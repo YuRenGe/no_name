@@ -151,6 +151,15 @@ class Game(AbstractGame):
         observation, reward, done, _ = self.env.step(action)
         return numpy.array([[observation]]), reward, done
 
+    def to_play(self):
+        """
+        Return the current player.
+
+        Returns:
+            The current player, it should be an element of the players list in the config.
+        """
+        return self.env.to_play()
+
     def legal_actions(self):
         """
         Should return the legal actions at each turn, if it is not available, it can return
@@ -202,18 +211,36 @@ class Game(AbstractGame):
         }
         return f"{action_number}. {actions[action_number]}"
 
+class Player:
+    '''只感知敌人状态'''
+    def __init__(self, _id, _team, _type, _dis, _lives, _HP, _dam, _axis):
+        self.id = _id
+        self.team = _team # 敌方队伍 1 我方队伍 0
+        self.type = _type # 步兵 0 炮兵 1 特种兵 2
+        self.dis = _dis # 攻击距离
+        self.lives = _lives # 可复活次数
+        self.HP = _HP # 生命值
+        self.dam = _dam # 攻击伤害
+        self.axis = _axis # 坐标
+
+    def get_info(self, who): # TODO 好像用不到
+        '''who'''
+        if who.team != self.team:
+            return self._axis
+        #TODO
 
 class WarGame:
     def __init__(self):
-        self.board_size = 21
-        self.player = 1
-        # 记录每个玩家的小兵位置
-        self.players = []
-        self.num_characters = 10
+        self.board_size = 20
+        self.players_num = 20
+        self.cur_player = 0
+        self.players_list = [] # [0:10] 我方队伍  [10:] 敌方队伍
         self.max_health = 100
-        self.max_lives = 2
-        self.obervation_space = self.board_size * self.board_size
+        self.max_lives = 3
         self.board = numpy.zeros((self.board_size * self.board_size), dtype="int32")
+        self.act_num = 0 # 记录已经活动的士兵 每回合每个队伍内的每个角色可以活动10步
+        self.step = 0 # 记录该team已经活动的步数
+
         # 创建障碍物
         self.place_obstacles()
         self.init_characters()
@@ -225,64 +252,50 @@ class WarGame:
             row, col = numpy.random.randint(self.board_size, size = 2)
             self.board[row][col] = -1
 
-    def init_characters(self):
-        for player_id in range(2):
-            player_characters = []
-            for char_id in range(1, self.num_characters + 1):
-                char_row, char_col = self.random_empty_cell()
-            if char_id <= 2:
-                character = {
-                    'id' : char_id,
-                    'type': "Special Force",
-                    'health': self.max_health,
-                    'lives': 2,
-                    'damage': 11,
-                    'position': (char_row, char_col)
-                }
-            elif char_id <= 5:
-                character = {
-                    'id' : char_id,
-                    'type': "Artillery",
-                    'health': self.max_health,
-                    'lives': 2,
-                    'damage': 11,
-                    'position': (char_row, char_col)
-                }
-            else:
-                character = {
-                    'id' : char_id,
-                    'type': "Soilder",
-                    'health': self.max_health,
-                    'lives': 2,
-                    'damage': 10,
-                    'position': (char_row, char_col)
-                }
-            player_characters.append(character)
-        self.players.append(player_characters)
-
-
-    def random_empty_cell(self):
+    def random_empty_cell(self): # 随机一个位置
         while True:
             row, col = numpy.random.randint(self.board_size, size = 2)
             if self.board_size[row][col] == 0:
                 return row, col
 
+    def init_characters(self):
+        for _id in range(1, self.players_num + 1): 
+            _row, _col = self.random_empty_cell()
+            if _id <= 10:
+                team = 0
+            else:
+                team = 1
+            if _id % 10 <= 2: # 2个特种兵
+                self.players_list.append(Player(_id, team, 2, 1, 2, 100, 11, [_row, _col]))
+            elif _id % 10 <= 5: # 3个炮兵
+                self.players_list.append(Player(_id, team, 1, 1, 2, 100, 12, [_row, _col]))
+            else:
+                self.players_list.append(Player(_id, _team=team, _type=0, _dis=1, _lives=2, _HP=100, _dam=10, _axis=[_row, _col]))
+
     def to_play(self):
-        return 0 if self.player == 1 else 1
+        # 遍历搜索
+        # team轮流走 考虑队伍有减员的情况
+        # 每回合每个队伍内的每个角色可以活动10步
+
+        while(1): # 死亡跳过
+            self.cur_player += 1
+            if self.cur_player % 10 == 0: # 一个队伍走完一步
+                #TODO 每走完10个单位（1步）刷新一次地图（把地图上的暂存路径都删除）
+                self.steps += 1
+                if self.steps == 10: 
+                    # 走完10步 切换队伍 刷新step
+                    self.steps = 0
+                    self.cur_player =  self.cur_player % self.players_num: # 切换到第一个
+                else:
+                    # 走完1步 重新回到该队伍第一个士兵
+                    self.cur_player = self.cur_player - self.players_num/2 # 10个角色
+                    self.steps = 0
+            if self.players_list[self.cur_player].lives >= 0: # TODO 需要确认0条命时是死是活
+                break
+        return self.cur_player
     
     def reset(self):
-        self.board_size = 21
-        self.player = 1
-        # 记录每个玩家的小兵位置
-        self.players = []
-        self.num_characters = 10
-        self.max_health = 100
-        self.max_lives = 2
-        self.obervation_space = self.board_size * self.board_size
-        self.board = numpy.zeros((self.board_size * self.board_size), dtype="int32")
-        # 创建障碍物
-        self.place_obstacles()
-        self.init_characters()
+        self.__init__()
     
     # def step(self):
         
