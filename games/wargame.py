@@ -20,7 +20,7 @@ class MuZeroConfig:
 
         ### Game
         self.observation_shape = (3, 21, 21)  # Dimensions of the game observation, must be 3D (channel, height, width). For a 1D array, please reshape it to (1, 1, length of array)
-        self.action_space = list(range(10 * 21 * 21 * 21 * 21))  # Fixed list of all possible actions. You should only edit the length
+        self.action_space = list(range(9))  # Fixed list of all possible actions. You should only edit the length
         self.players = list(range(2))  # List of players. You should only edit the length
         self.stacked_observations = 3  # Number of previous observations and previous actions to add to the current observation
 
@@ -32,7 +32,7 @@ class MuZeroConfig:
 
         ### Self-Play
         self.num_workers = 1  # Number of simultaneous threads/workers self-playing to feed the replay buffer
-        self.selfplay_on_gpu = True
+        self.selfplay_on_gpu = False
         self.max_moves = 100  # Maximum number of moves if game is not finished before
         self.num_simulations = 50  # Number of future moves self-simulated
         self.discount = 0.997  # Chronological discount of the reward
@@ -134,9 +134,7 @@ class Game(AbstractGame):
     """
 
     def __init__(self, seed=None):
-        self.env = gym.make("CartPole-v1")
-        if seed is not None:
-            self.env.seed(seed)
+        self.env = WarGame()
 
     def step(self, action):
         """
@@ -148,8 +146,8 @@ class Game(AbstractGame):
         Returns:
             The new observation, the reward and a boolean if the game has ended.
         """
-        observation, reward, done, _ = self.env.step(action)
-        return numpy.array([[observation]]), reward, done
+        observation, reward, done = self.env.step(action)
+        return observation, reward, done
 
     def to_play(self):
         """
@@ -160,6 +158,14 @@ class Game(AbstractGame):
         """
         return self.env.to_play()
 
+    def reset(self):
+        """
+        Reset the game for a new game.
+
+        Returns:
+            Initial observation of the game.
+        """
+        return self.env.reset()
     def legal_actions(self):
         """
         Should return the legal actions at each turn, if it is not available, it can return
@@ -171,17 +177,7 @@ class Game(AbstractGame):
         Returns:
             An array of integers, subset of the action space.
         """
-        return list(range(2))
-
-    def reset(self):
-        """
-        Reset the game for a new game.
-
-        Returns:
-            Initial observation of the game.
-        """
-        return numpy.array([[self.env.reset()]])
-
+        return list(range(9))
     def close(self):
         """
         Properly close the game.
@@ -205,15 +201,22 @@ class Game(AbstractGame):
         Returns:
             String representing the action.
         """
-        actions = {
-            0: "Push cart to the left",
-            1: "Push cart to the right",
+        actions = { # 坐标变换
+            0: "不移动",
+            1: "向东前进",
+            2: "向东南前进", # 东南
+            3: "向南前进", # 南
+            4: "向西南前进", # 西南
+            5: "向西前进", # 西
+            6: "向西北前进",# 西北
+            7: "向北前进", # 北
+            8: "向东北前进", # 东北
         }
         return f"{action_number}. {actions[action_number]}"
 
-class Player:
+class Chess:
     '''只感知敌人状态'''
-    def __init__(self, _id, _team, _type, _dis, _lives, _HP, _dam, _axis):
+    def __init__(self, _id, _team, _type, _dis, _lives, _HP, _dam, _pos):
         self.id = _id
         self.team = _team # 敌方队伍 1 我方队伍 0
         self.type = _type # 步兵 0 炮兵 1 特种兵 2
@@ -221,81 +224,239 @@ class Player:
         self.lives = _lives # 可复活次数
         self.HP = _HP # 生命值
         self.dam = _dam # 攻击伤害
-        self.axis = _axis # 坐标
-
+        self.pos = _pos # 坐标
+        self.attack_pos = set() # 本回合已攻击过的坐标
     def get_info(self, who): # TODO 好像用不到
         '''who'''
         if who.team != self.team:
             return self._axis
-        #TODO
+    def update_pos(self, new_pos):
+        self.pos = new_pos
 
 class WarGame:
     def __init__(self):
-        self.board_size = 20
-        self.players_num = 20
-        self.cur_player = 0
-        self.players_list = [] # [0:10] 我方队伍  [10:] 敌方队伍
-        self.max_health = 100
-        self.max_lives = 3
-        self.board = numpy.zeros((self.board_size * self.board_size), dtype="int32")
+        self.OBSTACLE_AXIS = 0
+        self.TEAM1_AXIS = 1
+        self.TEAM2_AXIS = 2
+        self.MAX_TURN = 100
+        self.team_member = [10, 10] # 一开始存活10人
+        self.board_size = 21
+        self.chess_num = 20
+        self.game_start = False
+        self.cur_chess = -1 # to_play + 1 
+        self.chess_list = [] # [0:10] 我方队伍  [10:] 敌方队伍
+        self.board = []
+        for i in range(3):
+            t = []
+            for j in range(self.board_size):
+                t.append([0] * self.board_size)
+            self.board.append(t)
+        self.board_render = []
+        for j in range(self.board_size):
+            self.board_render.append([0] * self.board_size)# 记录士兵移动
         self.act_num = 0 # 记录已经活动的士兵 每回合每个队伍内的每个角色可以活动10步
-        self.step = 0 # 记录该team已经活动的步数
-
+        self.steps = 0 # 记录一方玩家已经活动的步数
+        self.turn = 0 # 记录回合数
+        
         # 创建障碍物
         self.place_obstacles()
         self.init_characters()
-        
-        
+        # 移动方式
+        self.direction_move = { # 坐标变换
+            0:(0, 0), # 不动
+            1:(1, 0), # 东
+            2:(1, -1), # 东南
+            3:(0, -1), # 南
+            4:(-1, -1), # 西南
+            5:(-1, 0), # 西
+            6:(-1, 1), # 西北
+            7:(0, 1), # 北
+            8:(1, 1), # 东北
+        }
+        # 分数定义
+        self.normalReward = {
+            "MEET_OBSTACLE":-100,
+            "ATTACK_ONEENEMY":50,
+            "ATTACK_ONEENEMY_ADDING":50, # 集火
+            "MEET_ALI":-200
+        }
+
     def place_obstacles(self):
         obstacles_num = numpy.random.randint(0, 300)
         for _ in range(obstacles_num):
             row, col = numpy.random.randint(self.board_size, size = 2)
-            self.board[row][col] = -1
+            self.board[self.OBSTACLE_AXIS][row][col] = 1
+            self.board_render[row][col] = -1
 
-    def random_empty_cell(self): # 随机一个位置
+    def random_empty_cell(self): # 随机一个空位置
         while True:
             row, col = numpy.random.randint(self.board_size, size = 2)
-            if self.board_size[row][col] == 0:
+            if self.board[self.OBSTACLE_AXIS][row][col] == 0 and \
+                self.board[self.TEAM1_AXIS][row][col] == 0 and \
+                self.board[self.TEAM2_AXIS][row][col] == 0:
                 return row, col
 
     def init_characters(self):
-        for _id in range(1, self.players_num + 1): 
+        for _id in range(0, self.chess_num): 
             _row, _col = self.random_empty_cell()
-            if _id <= 10:
-                team = 0
-            else:
+            if _id < self.chess_num/2:
                 team = 1
-            if _id % 10 <= 2: # 2个特种兵
-                self.players_list.append(Player(_id, team, 2, 1, 2, 100, 11, [_row, _col]))
-            elif _id % 10 <= 5: # 3个炮兵
-                self.players_list.append(Player(_id, team, 1, 1, 2, 100, 12, [_row, _col]))
+                self.board[self.TEAM1_AXIS][_row][_col] = 1
             else:
-                self.players_list.append(Player(_id, _team=team, _type=0, _dis=1, _lives=2, _HP=100, _dam=10, _axis=[_row, _col]))
+                team = 2
+                self.board[self.TEAM2_AXIS][_row][_col] = 1
+            self.board_render[_row][_col] = _id
+            if _id % 10 < 2: # 2个特种兵
+                self.chess_list.append(Chess(_id, team, 2, 1, 2, 100, 11, [_row, _col]))
+            elif _id % 10 < 5: # 3个炮兵
+                self.chess_list.append(Chess(_id, team, 1, 1, 2, 100, 12, [_row, _col]))
+            else:
+                self.chess_list.append(Chess(_id, _team=team, _type=0, _dis=1, _lives=2, _HP=100, _dam=10, _pos=[_row, _col]))
 
     def to_play(self):
         # 遍历搜索
         # team轮流走 考虑队伍有减员的情况
         # 每回合每个队伍内的每个角色可以活动10步
-
+        # 训练时角色状态实时更新（实际输入时敌方玩家只有回合初始位置信息）  
+        # 实际游戏中一方角色不感知另一方角色血量及复活位置 如果复活相撞应该会报异常（随机性）
         while(1): # 死亡跳过
-            self.cur_player += 1
-            if self.cur_player % 10 == 0: # 一个队伍走完一步
-                #TODO 每走完10个单位（1步）刷新一次地图（把地图上的暂存路径都删除）
+            self.cur_chess += 1
+            if self.game_start == False:
+                self.game_start = True
+                break
+            if self.cur_chess % 10 == 0: # 一个队伍走完一步
                 self.steps += 1
                 if self.steps == 10: 
-                    # 走完10步 切换队伍 刷新step
+                    # 走完10步 切换队伍 刷新step 刷新攻击列表 
+                    for chess in self.chess_list:
+                        chess.attack_pos = set()
                     self.steps = 0
-                    self.cur_player =  self.cur_player % self.players_num: # 切换到第一个
+                    # 切换到下一队第一个
+                    if self.cur_chess == self.chess_num:
+                        self.cur_chess = 0
+                    else:
+                        self.cur_chess = 10
+                    if self.cur_chess == 0:
+                        self.turn += 1
                 else:
                     # 走完1步 重新回到该队伍第一个士兵
-                    self.cur_player = self.cur_player - self.players_num/2 # 10个角色
-                    self.steps = 0
-            if self.players_list[self.cur_player].lives >= 0: # TODO 需要确认0条命时是死是活
+                    if self.cur_chess == self.chess_num:
+                        self.cur_chess = 10
+                    else:
+                        self.cur_chess = 0
+            if self.chess_list[self.cur_chess].lives >= 0: # TODO 需要确认0条命时是死是活
+                if cur_chess < 10:
+                    cur_player = 0
+                else:
+                    cur_player = 1
                 break
-        return self.cur_player
+        return cur_player
     
     def reset(self):
         self.__init__()
+        return numpy.array(self.board, dtype=numpy.float32)
     
-    # def step(self):
+    def legal_actions(self, pos):
+        '''
+        返回合法的行为 以及不合法的行为及后果
+        '''
+        MEET_OBSTACLE = 0
+        legal_actions = [0]
+        illegal_actions = {}
+        for action in range(1, 9):
+            after_row, after_col = self.apply_move(pos, action)
+            if after_row < 0 or \
+                after_row > self.board_size or \
+                after_col < 0 or \
+                after_colv > self.board_size: # 越界
+                illegal[action] = self.normalReward["MEET_OBSTACLE"]
+            elif self.board[self.OBSTACLE_AXIS][after_row][after_col] == 1 :
+                illegal[action] = self.normalReward["MEET_OBSTACLE"]
+            elif self.board[self.TEAM1_AXIS][after_row][after_col] == 1 or \
+                self.board[self.TEAM2_AXIS][after_row][after_col] == 1: # 碰撞
+                illegal[action] = self.normalReward["MEET_ALI"]
+            else:
+                legal_actions.append(action)
+        return legal_actions, illegal_actions
+    def apply_move(self, pos, action):
+        return [pos[0] + self.dichess_listrection_move[action], pos[1] + self.direction_move[action]]
+    
+    def step(self, action):
+        ret_reward = 0
+        if self.cur_chess < 10 :
+            cur_team = TEAM1_AXIS
+        else:
+            cur_team = TEAM2_AXIS
+        if self.turn == self.MAX_TURN: # 100回合结束
+            # 生命值差值绝对值 鼓励进攻
+            ret_reward += abs(self.team_member[0] - self.team_member[1]) * 200
+            return self.board, ret_reward, True
+        cur_chess_exp = self.chess_list[self.cur_chess]
+        legal_actions, illegal_actions = self.legal_actions(cur_chess_exp.pos)
+        after_row, after_col = self.apply_move(pos, action)
         
+        if action in legal_actions: # 如果合法 地图变 位置变
+            self.board[cur_team][pos[0]][pos[1]] = 0
+            self.board[cur_team][after_row][after_col] = 1
+            self.board_render[pos[0]][pos[1]] = 0
+            self.board_render[after_row][after_col] = cur_chess_exp.id # 移动
+            cur_chess_exp.update_pos([after_row, after_col])
+            attack_reward = self.get_attack_reward(cur_chess_exp)
+            ret_reward += attack_reward
+        else: # 不合法 扣分
+            ret_reward -= illegal_actions[action]
+        
+        if complete_destroy(cur_team): # 完全消灭
+            ret_reward += self.team_member[cur_team - 1] * 200
+            return self.board, ret_reward, True
+        return numpy.array(self.board, dtype=numpy.float32), ret_reward, False 
+    
+    def get_attack_reward(self, cur_chess):
+        cur_pos = cur_chess.pos
+        if cur_chess.team == 1 :
+            enemy_team = self.TEAM2_AXIS
+        else:
+            enemy_team = self.TEAM1_AXIS
+        attack_reward = 0
+        # TODO 集火
+        for fire_range in self.direction_move:
+            if fire_range == 0:
+                continue
+            fire_pos_x = cur_pos[0] + self.direction_move[fire_range][0]
+            fire_pos_y = cur_pos[1] + self.direction_move[fire_range][1]
+            fire_pos = (fire_pos_x, fire_pos_y)
+            if fire_pos not in cur_chess.attack_pos and self.board[enemy_team][fire_pos_x][fire_pos_y] == 1:
+                cur_chess.attack_pos.add(fire_pos)
+                attack_reward += 50
+                # 更新被攻击方信息
+                enemy_id = self.board_render[fire_pos_x][fire_pos_y]
+                enemy_exp = self.chess_list[enemy_id]
+                enemy_exp.HP -= cur_chess.dam
+                if enemy_exp.HP <= 0:
+                    # 死亡
+                    enemy_exp.lives -= 1
+                    self.board[enemy_exp.team][enemy_exp.pos[0]][enemy_exp.pos[1]] = 0
+                    self.board_render[enemy_exp.pos[0]][enemy_exp.pos[1]] = 0
+                    # 复活
+                    if enemy_exp.lives >= 0:
+                        rst_pos_x, rst_pos_y = self.random_empty_cell()
+                        enemy_exp.pos = [rst_pos_x, rst_pos_y]
+                        self.board[enemy_exp.team][rst_pos_x][rst_pos_y] = 1
+                        self.board_render[rst_pos_x][rst_pos_y] = enemy_exp.id
+                    else:
+                        self.team_member[enemy_exp.team - 1] -= 1
+        return attack_reward
+    
+    def complete_destroy(self, cur_team):
+        if cur_team == 1:
+            enemy_team_index = 1
+        else:
+            enemy_team_index = 0
+        if self.team_member[enemy_team_index] == 0: # 1->1(team2) 2->0(team1)
+            return True
+        else:
+            return False
+
+    def render(self):
+        # TODO
+        print(numpy.array(self.board_render))
